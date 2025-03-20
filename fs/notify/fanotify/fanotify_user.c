@@ -705,7 +705,8 @@ static int copy_info_records_to_user(struct fanotify_event *event,
 
 static ssize_t copy_event_to_user(struct fsnotify_group *group,
 				  struct fanotify_event *event,
-				  char __user *buf, size_t count)
+				  char __user *buf, size_t count,
+				  bool queryEventsOnly)
 {
 	struct fanotify_event_metadata metadata;
 	const struct path *path = fanotify_event_path(event);
@@ -738,7 +739,12 @@ static ssize_t copy_event_to_user(struct fsnotify_group *group,
 	 * for safety in case fid mode requirement is relaxed in the future
 	 * to allow unprivileged listener to get events with no fd and no fid.
 	 */
-	if (!FAN_GROUP_FLAG(group, FANOTIFY_UNPRIV) &&
+	bool reuseEventFd = !FAN_GROUP_FLAG(group, FANOTIFY_UNPRIV) &&
+			    queryEventsOnly &&
+			    fanotify_is_perm_event(event->mask);
+	if (reuseEventFd) {
+		fd = FANOTIFY_PERM(event)->fd;
+	} else if (!FAN_GROUP_FLAG(group, FANOTIFY_UNPRIV) &&
 	    path && path->mnt && path->dentry) {
 		fd = create_fd(group, path, &f);
 		/*
@@ -831,7 +837,7 @@ static ssize_t copy_event_to_user(struct fsnotify_group *group,
 	return metadata.event_len;
 
 out_close_fd:
-	if (f) {
+	if (f && !reuseEventFd) {
 		put_unused_fd(fd);
 		fput(f);
 	}
@@ -902,7 +908,7 @@ static ssize_t fanotify_read(struct file *file, char __user *buf,
 			continue;
 		}
 
-		ret = copy_event_to_user(group, event, buf, count);
+		ret = copy_event_to_user(group, event, buf, count, false);
 
 		/*
 		 * Permission events get queued to wait for response.  Other
@@ -1763,6 +1769,7 @@ static int fanotify_events_supported(struct fsnotify_group *group,
 	return 0;
 }
 
+	
 static ssize_t get_pending_events(int fanotify_fd, char __user *buf,
 				  size_t count)
 {
@@ -1797,7 +1804,7 @@ static ssize_t get_pending_events(int fanotify_fd, char __user *buf,
 			break;
 		}
 
-		ret = copy_event_to_user(group, &event->fae, buf, count);
+		ret = copy_event_to_user(group, &event->fae, buf, count, true);
 		if (unlikely(ret == -EOPENSTALE)) {
 			/* skip the event if it is stale */
 			ret = 0;
@@ -1812,7 +1819,6 @@ static ssize_t get_pending_events(int fanotify_fd, char __user *buf,
 	return ret;
 }
 
-	
 SYSCALL_DEFINE3(fanotify_pending_events, int, fanotify_fd, char __user *, buf,
 		size_t, count)
 {
