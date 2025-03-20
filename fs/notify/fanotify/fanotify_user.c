@@ -1763,6 +1763,62 @@ static int fanotify_events_supported(struct fsnotify_group *group,
 	return 0;
 }
 
+static ssize_t get_pending_events(int fanotify_fd, char __user *buf,
+				  size_t count)
+{
+	struct fd f;
+	struct fsnotify_group *group;
+	unsigned int info_mode;
+	struct fanotify_perm_event *event;
+	size_t event_size;
+	int ret;
+
+	f = fdget(fanotify_fd);
+	if (unlikely(!f.file))
+		return -EBADF;
+
+	/* verify that this is indeed an fanotify instance */
+	if (unlikely(f.file->f_op != &fanotify_fops))
+		return -EBADF;
+
+	group = f.file->private_data;
+	info_mode = FAN_GROUP_FLAG(group, FANOTIFY_INFO_MODES);
+	pr_debug("%s: group=%p count=%zd\n", __func__, group, count);
+
+	ret = -EINVAL;
+	spin_lock(&group->notification_lock);
+	list_for_each_entry(event, &group->fanotify_data.access_list,
+			    fae.fse.list) {
+		cond_resched();
+
+		/* verify that count is large enough for the event */
+		event_size = fanotify_event_len(info_mode, &event->fae);
+		if (event_size > count) {
+			break;
+		}
+
+		ret = copy_event_to_user(group, &event->fae, buf, count);
+		if (unlikely(ret == -EOPENSTALE)) {
+			/* skip the event if it is stale */
+			ret = 0;
+		}
+		if (ret < 0)
+			break;
+
+		buf += ret;
+		count -= ret;
+	}
+	spin_unlock(&group->notification_lock);
+	return ret;
+}
+
+	
+SYSCALL_DEFINE3(fanotify_pending_events, int, fanotify_fd, char __user *, buf,
+		size_t, count)
+{
+	return get_pending_events(fanotify_fd, buf, count);
+}
+
 static int do_fanotify_mark(int fanotify_fd, unsigned int flags, __u64 mask,
 			    int dfd, const char  __user *pathname)
 {
